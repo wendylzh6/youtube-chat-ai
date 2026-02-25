@@ -277,7 +277,6 @@ app.post('/api/youtube/channel', async (req, res) => {
 
   try {
     const ytdl = require('@distube/ytdl-core');
-    const { YoutubeTranscript } = require('youtube-transcript');
 
     // Normalize channel URL and append /videos
     const channelBase = url.replace(/\/+$/, '');
@@ -393,32 +392,79 @@ app.post('/api/youtube/channel', async (req, res) => {
         transcript: '',
       };
 
-      // Enrich with ytdl basic info
+      // Enrich with ytdl info (getInfo for comment count + richer data + captions)
       try {
-        const info = await ytdl.getBasicInfo(
+        const info = await ytdl.getInfo(
           `https://www.youtube.com/watch?v=${videoId}`
         );
         const details = info.videoDetails;
         videoData.title = details.title || title;
         videoData.description = (details.shortDescription || '').slice(0, 1000);
         videoData.release_date = details.publishDate || '';
-        videoData.view_count = details.viewCount ? parseInt(details.viewCount) : null;
-        videoData.like_count = details.likes ? parseInt(details.likes) : null;
-        videoData.thumbnail =
-          details.thumbnails?.slice(-1)[0]?.url || thumbnailUrl;
+        videoData.view_count = details.viewCount ? parseInt(details.viewCount, 10) : null;
+        videoData.like_count = details.likes != null ? parseInt(details.likes, 10) : null;
+        videoData.thumbnail = details.thumbnails?.slice(-1)[0]?.url || thumbnailUrl;
+
+        // comment_count: path 1 — player_response.videoDetails.commentCount
+        const ccRaw = info.player_response?.videoDetails?.commentCount;
+        if (ccRaw != null) {
+          videoData.comment_count = parseInt(ccRaw, 10);
+        } else {
+          // path 2 — engagement panels in the next response
+          const panels = info.response?.engagementPanels || [];
+          for (const panel of panels) {
+            const hdr =
+              panel?.engagementPanelSectionListRenderer?.header
+                ?.engagementPanelTitleHeaderRenderer;
+            const countText = hdr?.contextualInfo?.runs?.[0]?.text;
+            if (countText) {
+              const n = parseInt(countText.replace(/,/g, ''), 10);
+              if (!isNaN(n)) { videoData.comment_count = n; break; }
+            }
+          }
+        }
+
+        // Transcript: use yt-dlp (most reliable — bypasses YouTube bot detection)
+        try {
+          const { execFile } = require('child_process');
+          const os = require('os');
+          const path = require('path');
+          const fs = require('fs');
+          const tmpBase = path.join(os.tmpdir(), `yt_sub_${videoId}`);
+          await new Promise((resolve) => {
+            execFile(
+              'yt-dlp',
+              [
+                '--skip-download',
+                '--write-auto-sub',
+                '--sub-lang', 'en',
+                '--sub-format', 'json3',
+                '-o', tmpBase,
+                `https://www.youtube.com/watch?v=${videoId}`,
+              ],
+              { timeout: 20000 },
+              (err) => resolve(err)
+            );
+          });
+          const subFile = `${tmpBase}.en.json3`;
+          if (fs.existsSync(subFile)) {
+            const json = JSON.parse(fs.readFileSync(subFile, 'utf8'));
+            const text = (json.events || [])
+              .flatMap((e) => (e.segs || []).map((s) => s.utf8))
+              .filter(Boolean)
+              .join(' ')
+              .replace(/\n/g, ' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .slice(0, 5000);
+            if (text) videoData.transcript = text;
+            fs.unlinkSync(subFile);
+          }
+        } catch {
+          // transcript not available — keep empty
+        }
       } catch (e) {
         console.warn(`[YouTube] ytdl info failed for ${videoId}:`, e.message);
-      }
-
-      // Try to fetch transcript
-      try {
-        const transcript = await YoutubeTranscript.fetchTranscript(videoId);
-        videoData.transcript = transcript
-          .map((t) => t.text)
-          .join(' ')
-          .slice(0, 5000);
-      } catch {
-        // transcript not available — silent skip
       }
 
       videos.push(videoData);
