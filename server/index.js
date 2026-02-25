@@ -47,7 +47,7 @@ app.get('/api/status', async (req, res) => {
 
 app.post('/api/users', async (req, res) => {
   try {
-    const { username, password, email } = req.body;
+    const { username, password, email, firstName, lastName } = req.body;
     if (!username || !password)
       return res.status(400).json({ error: 'Username and password required' });
     const name = String(username).trim().toLowerCase();
@@ -58,6 +58,8 @@ app.post('/api/users', async (req, res) => {
       username: name,
       password: hashed,
       email: email ? String(email).trim().toLowerCase() : null,
+      firstName: firstName ? String(firstName).trim() : '',
+      lastName: lastName ? String(lastName).trim() : '',
       createdAt: new Date().toISOString(),
     });
     res.json({ ok: true });
@@ -76,7 +78,12 @@ app.post('/api/users/login', async (req, res) => {
     if (!user) return res.status(401).json({ error: 'User not found' });
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(401).json({ error: 'Invalid password' });
-    res.json({ ok: true, username: name });
+    res.json({
+      ok: true,
+      username: name,
+      firstName: user.firstName || '',
+      lastName: user.lastName || '',
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -151,7 +158,7 @@ app.patch('/api/sessions/:id/title', async (req, res) => {
 
 app.post('/api/messages', async (req, res) => {
   try {
-    const { session_id, role, content, imageData, charts, toolCalls } = req.body;
+    const { session_id, role, content, imageData, charts, toolCalls, videoCard } = req.body;
     if (!session_id || !role || content === undefined)
       return res.status(400).json({ error: 'session_id, role, content required' });
     const msg = {
@@ -163,6 +170,7 @@ app.post('/api/messages', async (req, res) => {
       }),
       ...(charts?.length && { charts }),
       ...(toolCalls?.length && { toolCalls }),
+      ...(videoCard && { videoCard }),
     };
     await db.collection('sessions').updateOne(
       { _id: new ObjectId(session_id) },
@@ -198,11 +206,230 @@ app.get('/api/messages', async (req, res) => {
           : undefined,
         charts: m.charts?.length ? m.charts : undefined,
         toolCalls: m.toolCalls?.length ? m.toolCalls : undefined,
+        videoCard: m.videoCard || undefined,
       };
     });
     res.json(msgs);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Image generation (Gemini 2.5 Flash Image) ─────────────────────────────────
+
+const { GoogleGenAI } = require('@google/genai');
+const genAI_img = new GoogleGenAI({ apiKey: process.env.REACT_APP_GEMINI_API_KEY || '' });
+
+app.post('/api/generate-image', async (req, res) => {
+  const { prompt, anchorImages = [] } = req.body;
+  if (!prompt) return res.status(400).json({ error: 'prompt is required' });
+
+  try {
+    const contents = [
+      ...anchorImages.map((img) => ({
+        inlineData: { mimeType: img.mimeType || 'image/png', data: img.data },
+      })),
+      { text: prompt },
+    ];
+
+    const result = await genAI_img.models.generateContent({
+      model: 'gemini-2.5-flash-image',
+      contents,
+      config: { responseModalities: ['TEXT', 'IMAGE'] },
+    });
+
+    const parts = result.candidates?.[0]?.content?.parts || [];
+    const imagePart = parts.find((p) => p.inlineData?.mimeType?.startsWith('image/'));
+
+    if (!imagePart) {
+      const textPart = parts.find((p) => p.text);
+      return res.status(500).json({
+        error: textPart?.text || 'No image was generated. Try a different prompt.',
+      });
+    }
+
+    res.json({ mimeType: imagePart.inlineData.mimeType, data: imagePart.inlineData.data });
+  } catch (err) {
+    console.error('[Image generation error]', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── YouTube Channel Download (SSE) ────────────────────────────────────────────
+
+app.post('/api/youtube/channel', async (req, res) => {
+  const { url, maxVideos = 10 } = req.body;
+
+  if (!url) {
+    return res.status(400).json({ error: 'url required' });
+  }
+
+  // Set up SSE headers
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const send = (data) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  try {
+    const ytdl = require('@distube/ytdl-core');
+    const { YoutubeTranscript } = require('youtube-transcript');
+
+    // Normalize channel URL and append /videos
+    const channelBase = url.replace(/\/+$/, '');
+    const channelUrl = channelBase.endsWith('/videos')
+      ? channelBase
+      : `${channelBase}/videos`;
+
+    const pageResponse = await fetch(channelUrl, {
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    });
+
+    if (!pageResponse.ok) {
+      throw new Error(`Failed to fetch channel page: HTTP ${pageResponse.status}`);
+    }
+
+    const html = await pageResponse.text();
+
+    // Extract ytInitialData JSON from the page
+    let ytData;
+    const match =
+      html.match(/var ytInitialData\s*=\s*(\{.+?\});\s*<\/script>/s) ||
+      html.match(/ytInitialData\s*=\s*(\{.+?\});\s*(?:var |<\/script>)/s);
+
+    if (!match) {
+      throw new Error(
+        'Could not extract ytInitialData. The channel may not exist or YouTube blocked the request.'
+      );
+    }
+
+    try {
+      ytData = JSON.parse(match[1]);
+    } catch {
+      throw new Error('Failed to parse ytInitialData JSON.');
+    }
+
+    // Navigate to video renderers
+    const tabs =
+      ytData?.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
+
+    let videoRenderers = [];
+
+    for (const tab of tabs) {
+      const tabR = tab?.tabRenderer;
+      if (!tabR) continue;
+
+      // Modern layout: richGridRenderer
+      const richGrid = tabR?.content?.richGridRenderer;
+      if (richGrid?.contents?.length) {
+        videoRenderers = richGrid.contents
+          .filter((c) => c?.richItemRenderer?.content?.videoRenderer)
+          .map((c) => c.richItemRenderer.content.videoRenderer);
+        if (videoRenderers.length) break;
+      }
+
+      // Older layout: sectionListRenderer
+      const sectionList = tabR?.content?.sectionListRenderer;
+      if (sectionList) {
+        for (const section of sectionList.contents || []) {
+          const items =
+            section?.itemSectionRenderer?.contents?.[0]?.gridRenderer?.items || [];
+          videoRenderers = items
+            .filter((it) => it?.gridVideoRenderer)
+            .map((it) => it.gridVideoRenderer);
+          if (videoRenderers.length) break;
+        }
+        if (videoRenderers.length) break;
+      }
+    }
+
+    if (!videoRenderers.length) {
+      throw new Error(
+        'No videos found. Make sure the URL points to a public YouTube channel (e.g. https://www.youtube.com/@channelname).'
+      );
+    }
+
+    const limit = Math.min(videoRenderers.length, Math.max(1, Number(maxVideos) || 10));
+    const videos = [];
+
+    for (let i = 0; i < limit; i++) {
+      const vr = videoRenderers[i];
+      const videoId = vr?.videoId;
+      if (!videoId) continue;
+
+      send({ type: 'progress', current: i + 1, total: limit, percent: Math.round(((i + 1) / limit) * 100) });
+
+      // Basic metadata from ytInitialData
+      const title = vr?.title?.runs?.[0]?.text || vr?.title?.simpleText || '';
+      const thumbnailUrl =
+        vr?.thumbnail?.thumbnails?.slice(-1)[0]?.url || '';
+      const duration = vr?.lengthText?.simpleText || '';
+      const publishedTimeText = vr?.publishedTimeText?.simpleText || '';
+      const viewCountText =
+        vr?.viewCountText?.simpleText || vr?.shortViewCountText?.simpleText || '';
+
+      const videoData = {
+        video_id: videoId,
+        title,
+        video_url: `https://www.youtube.com/watch?v=${videoId}`,
+        thumbnail: thumbnailUrl,
+        duration,
+        published_time_text: publishedTimeText,
+        view_count_text: viewCountText,
+        description: '',
+        release_date: '',
+        view_count: null,
+        like_count: null,
+        comment_count: null,
+        transcript: '',
+      };
+
+      // Enrich with ytdl basic info
+      try {
+        const info = await ytdl.getBasicInfo(
+          `https://www.youtube.com/watch?v=${videoId}`
+        );
+        const details = info.videoDetails;
+        videoData.title = details.title || title;
+        videoData.description = (details.shortDescription || '').slice(0, 1000);
+        videoData.release_date = details.publishDate || '';
+        videoData.view_count = details.viewCount ? parseInt(details.viewCount) : null;
+        videoData.like_count = details.likes ? parseInt(details.likes) : null;
+        videoData.thumbnail =
+          details.thumbnails?.slice(-1)[0]?.url || thumbnailUrl;
+      } catch (e) {
+        console.warn(`[YouTube] ytdl info failed for ${videoId}:`, e.message);
+      }
+
+      // Try to fetch transcript
+      try {
+        const transcript = await YoutubeTranscript.fetchTranscript(videoId);
+        videoData.transcript = transcript
+          .map((t) => t.text)
+          .join(' ')
+          .slice(0, 5000);
+      } catch {
+        // transcript not available — silent skip
+      }
+
+      videos.push(videoData);
+    }
+
+    send({ type: 'done', videos });
+    res.end();
+  } catch (err) {
+    console.error('[YouTube endpoint error]', err.message);
+    send({ type: 'error', message: err.message });
+    res.end();
   }
 });
 

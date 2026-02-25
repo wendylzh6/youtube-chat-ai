@@ -10,12 +10,12 @@ const api = async (path, options = {}) => {
   return text ? JSON.parse(text) : {};
 };
 
-// ── Users ────────────────────────────────────────────────────────────────────
+// ── Users
 
-export const createUser = async (username, password, email = '') => {
+export const createUser = async (username, password, email = '', firstName = '', lastName = '') => {
   await api('/api/users', {
     method: 'POST',
-    body: JSON.stringify({ username, password, email }),
+    body: JSON.stringify({ username, password, email, firstName, lastName }),
   });
 };
 
@@ -24,11 +24,12 @@ export const findUser = async (username, password) => {
     method: 'POST',
     body: JSON.stringify({ username, password }),
   });
-  return data.ok ? { username: data.username } : null;
+  return data.ok
+    ? { username: data.username, firstName: data.firstName || '', lastName: data.lastName || '' }
+    : null;
 };
 
-// ── Sessions ─────────────────────────────────────────────────────────────────
-
+// ── Sessions
 export const getSessions = async (username) => {
   return api(`/api/sessions?username=${encodeURIComponent(username)}`);
 };
@@ -51,12 +52,19 @@ export const updateSessionTitle = async (sessionId, title) => {
   });
 };
 
-// ── Messages ─────────────────────────────────────────────────────────────────
-
-export const saveMessage = async (sessionId, role, content, imageData = null, charts = null, toolCalls = null) => {
+// ── Messages
+export const saveMessage = async (
+  sessionId,
+  role,
+  content,
+  imageData = null,
+  charts = null,
+  toolCalls = null,
+  videoCard = null
+) => {
   return api('/api/messages', {
     method: 'POST',
-    body: JSON.stringify({ session_id: sessionId, role, content, imageData, charts, toolCalls }),
+    body: JSON.stringify({ session_id: sessionId, role, content, imageData, charts, toolCalls, videoCard }),
   });
 };
 

@@ -1,9 +1,8 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { CSV_TOOL_DECLARATIONS } from './csvTools';
 
 const genAI = new GoogleGenerativeAI(process.env.REACT_APP_GEMINI_API_KEY || '');
 
-const MODEL = 'gemini-2.0-flash';
+const MODEL = 'gemini-2.5-flash-lite';
 
 const SEARCH_TOOL = { googleSearch: {} };
 const CODE_EXEC_TOOL = { codeExecution: {} };
@@ -23,12 +22,34 @@ async function loadSystemPrompt() {
   return cachedPrompt;
 }
 
+// ── Image generation ──────────────────────────────────────────────────────────
+// Calls the Express backend which runs gemini-2.5-flash-image via @google/genai
+// in Node.js (avoids browser SDK compatibility issues).
+// Returns { _imageType: 'generated', mimeType, data, prompt }
+
+export const generateImage = async (prompt, anchorImageParts = []) => {
+  const res = await fetch('/api/generate-image', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt, anchorImages: anchorImageParts }),
+  });
+
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error || 'Image generation failed');
+
+  return {
+    _imageType: 'generated',
+    mimeType: json.mimeType,
+    data: json.data,
+    prompt,
+  };
+};
+
+// ── Streaming chat (search or code execution) ─────────────────────────────────
 // Yields:
 //   { type: 'text', text }           — streaming text chunks
 //   { type: 'fullResponse', parts }  — when code was executed; replaces streamed text
 //   { type: 'grounding', data }      — Google Search metadata
-//
-// fullResponse parts: { type: 'text'|'code'|'result'|'image', ... }
 //
 // useCodeExecution: pass true to use codeExecution tool (CSV/analysis),
 //                   false (default) to use googleSearch tool.
@@ -36,10 +57,7 @@ async function loadSystemPrompt() {
 export const streamChat = async function* (history, newMessage, imageParts = [], useCodeExecution = false) {
   const systemInstruction = await loadSystemPrompt();
   const tools = useCodeExecution ? [CODE_EXEC_TOOL] : [SEARCH_TOOL];
-  const model = genAI.getGenerativeModel({
-    model: MODEL,
-    tools,
-  });
+  const model = genAI.getGenerativeModel({ model: MODEL, tools });
 
   const baseHistory = history.map((m) => ({
     role: m.role === 'user' ? 'user' : 'model',
@@ -68,7 +86,6 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
 
   const result = await chat.sendMessageStream(parts);
 
-  // Stream text chunks for live display
   for await (const chunk of result.stream) {
     const chunkParts = chunk.candidates?.[0]?.content?.parts || [];
     for (const part of chunkParts) {
@@ -76,7 +93,6 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
     }
   }
 
-  // After stream: inspect all response parts
   const response = await result.response;
   const allParts = response.candidates?.[0]?.content?.parts || [];
 
@@ -88,7 +104,6 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
   );
 
   if (hasCodeExecution) {
-    // Build ordered structured parts to replace the streamed text
     const structuredParts = allParts
       .map((p) => {
         if (p.text) return { type: 'text', text: p.text };
@@ -113,7 +128,6 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
     yield { type: 'fullResponse', parts: structuredParts };
   }
 
-  // Grounding metadata (search sources)
   const grounding = response.candidates?.[0]?.groundingMetadata;
   if (grounding) {
     console.log('[Search grounding]', grounding);
@@ -121,18 +135,15 @@ export const streamChat = async function* (history, newMessage, imageParts = [],
   }
 };
 
-// ── Function-calling chat for CSV tools ───────────────────────────────────────
-// Gemini picks a tool + args → executeFn runs it client-side (free) → Gemini
-// receives the result and returns a natural-language answer.
-//
-// executeFn(toolName, args) → plain JS object with the result
-// Returns the final text response from the model.
+// ── Function-calling chat (CSV + JSON + image generation tools) ───────────────
+// Accepts any set of tool declarations. executeFn is async.
+// Returns { text, charts, toolCalls, videoCards }
 
-export const chatWithCsvTools = async (history, newMessage, csvHeaders, executeFn) => {
+export const chatWithTools = async (history, newMessage, csvHeaders, executeFn, toolDeclarations, imageParts = []) => {
   const systemInstruction = await loadSystemPrompt();
   const model = genAI.getGenerativeModel({
     model: MODEL,
-    tools: [{ functionDeclarations: CSV_TOOL_DECLARATIONS }],
+    tools: [{ functionDeclarations: toolDeclarations }],
   });
 
   const baseHistory = history.map((m) => ({
@@ -153,42 +164,61 @@ export const chatWithCsvTools = async (history, newMessage, csvHeaders, executeF
 
   const chat = model.startChat({ history: chatHistory });
 
-  // Include column names so the model can match user intent to exact column names
-  const msgWithContext = csvHeaders?.length
+  const textContent = csvHeaders?.length
     ? `[CSV columns: ${csvHeaders.join(', ')}]\n\n${newMessage}`
     : newMessage;
 
-  let response = (await chat.sendMessage(msgWithContext)).response;
+  // Build the message parts — include any anchor images so Gemini can see them
+  const msgParts = [
+    ...imageParts.map((img) => ({ inlineData: { mimeType: img.mimeType, data: img.data } })),
+    { text: textContent },
+  ];
 
-  // Accumulate chart payloads and a log of every tool call made
+  let response = (await chat.sendMessage(msgParts)).response;
+
   const charts = [];
   const toolCalls = [];
+  const videoCards = [];
 
-  // Function-calling loop (Gemini may chain multiple tool calls)
-  for (let round = 0; round < 5; round++) {
+  for (let round = 0; round < 8; round++) {
     const parts = response.candidates?.[0]?.content?.parts || [];
     const funcCall = parts.find((p) => p.functionCall);
     if (!funcCall) break;
 
     const { name, args } = funcCall.functionCall;
-    console.log('[CSV Tool]', name, args);
-    const toolResult = executeFn(name, args);
-    console.log('[CSV Tool result]', toolResult);
+    console.log('[Tool]', name, args);
 
-    // Log the call for persistence
+    const toolResult = await executeFn(name, args);
+    console.log('[Tool result]', toolResult);
+
     toolCalls.push({ name, args, result: toolResult });
 
-    // Capture chart payloads so the UI can render them
-    if (toolResult?._chartType) {
+    if (toolResult?._chartType || toolResult?._imageType) {
       charts.push(toolResult);
     }
+    if (toolResult?._videoType) {
+      videoCards.push(toolResult);
+    }
+
+    // Strip large binary data before sending back to Gemini — base64 images can
+    // be 1-2 MB which blows the token limit and crashes the API call.
+    const resultForGemini = toolResult?._imageType
+      ? { success: true, imageGenerated: true, prompt: toolResult.prompt, mimeType: toolResult.mimeType }
+      : toolResult?._chartType
+        ? { success: true, chartGenerated: true, chartType: toolResult._chartType, dataPoints: toolResult.data?.length }
+        : toolResult?._videoType
+          ? { success: true, videoFound: true, title: toolResult.title, url: toolResult.url }
+          : toolResult;
 
     response = (
       await chat.sendMessage([
-        { functionResponse: { name, response: { result: toolResult } } },
+        { functionResponse: { name, response: { result: resultForGemini } } },
       ])
     ).response;
   }
 
-  return { text: response.text(), charts, toolCalls };
+  return { text: response.text(), charts, toolCalls, videoCards };
 };
+
+// ── Backwards-compatible alias
+export const chatWithCsvTools = chatWithTools;

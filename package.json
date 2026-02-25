@@ -3,6 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "dependencies": {
+    "@distube/ytdl-core": "^4.16.12",
+    "@google/genai": "^1.42.0",
     "@google/generative-ai": "^0.24.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
@@ -20,10 +22,11 @@
     "react-scripts": "5.0.1",
     "recharts": "^3.7.0",
     "remark-gfm": "^1.0.0",
-    "web-vitals": "^2.1.4"
+    "web-vitals": "^2.1.4",
+    "youtube-transcript": "^1.2.1"
   },
   "scripts": {
-    "start": "concurrently \"npm run server\" \"npm run client\"",
+    "start": "concurrently --kill-others-on-fail \"npm run server\" \"wait-on http://localhost:3001 && npm run client\"",
     "server": "node server/index.js",
     "client": "react-scripts start",
     "build": "react-scripts build",
@@ -48,5 +51,8 @@
       "last 1 firefox version",
       "last 1 safari version"
     ]
+  },
+  "devDependencies": {
+    "wait-on": "^9.0.4"
   }
 }

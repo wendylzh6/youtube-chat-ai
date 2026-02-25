@@ -5,3 +5,77 @@
 .App {
   min-height: 100vh;
 }
+
+/* ── Tab bar ─────────────────────────────────────────────────────────────── */
+
+.app-tab-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 500;
+  height: 44px;
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 0.85rem;
+}
+
+.tab-btn {
+  padding: 5px 14px;
+  background: none;
+  border: none;
+  color: #64748b;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.84rem;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 7px;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.tab-btn.active {
+  background: rgba(99, 102, 241, 0.1);
+  color: #6366f1;
+  font-weight: 600;
+}
+
+.tab-btn:hover:not(.active) {
+  background: rgba(15, 23, 42, 0.05);
+  color: #0f172a;
+}
+
+.tab-bar-spacer {
+  flex: 1;
+}
+
+.tab-logout-btn {
+  padding: 4px 12px;
+  background: none;
+  border: 1px solid rgba(15, 23, 42, 0.12);
+  border-radius: 7px;
+  color: #94a3b8;
+  font-family: 'Inter', sans-serif;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.tab-logout-btn:hover {
+  background: rgba(15, 23, 42, 0.05);
+  color: #475569;
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+/* ── Tab content ─────────────────────────────────────────────────────────── */
+
+.app-tab-content {
+  margin-top: 44px;
+  height: calc(100vh - 44px);
+  overflow: hidden;
+}

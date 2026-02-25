@@ -6,6 +6,8 @@ export default function Auth({ onLogin }) {
   const [mode, setMode] = useState('login');
   const [username, setUsername] = useState('');
   const [email, setEmail] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -17,15 +19,17 @@ export default function Auth({ onLogin }) {
     try {
       const name = username.trim().toLowerCase();
       if (mode === 'create') {
-        await createUser(name, password, email.trim());
+        await createUser(name, password, email.trim(), firstName.trim(), lastName.trim());
         setError('');
         setMode('login');
         setPassword('');
         setEmail('');
+        setFirstName('');
+        setLastName('');
       } else {
         const user = await findUser(name, password);
         if (!user) throw new Error('User not found or invalid password');
-        onLogin(user.username);
+        onLogin(user);
       }
     } catch (err) {
       try {
@@ -56,14 +60,34 @@ export default function Auth({ onLogin }) {
             autoComplete="username"
           />
           {mode === 'create' && (
-            <input
-              type="email"
-              placeholder="Email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              required
-              autoComplete="email"
-            />
+            <>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input
+                  type="text"
+                  placeholder="First name"
+                  value={firstName}
+                  onChange={(e) => setFirstName(e.target.value)}
+                  autoComplete="given-name"
+                  style={{ flex: 1, marginBottom: 0 }}
+                />
+                <input
+                  type="text"
+                  placeholder="Last name"
+                  value={lastName}
+                  onChange={(e) => setLastName(e.target.value)}
+                  autoComplete="family-name"
+                  style={{ flex: 1, marginBottom: 0 }}
+                />
+              </div>
+              <input
+                type="email"
+                placeholder="Email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+                autoComplete="email"
+              />
+            </>
           )}
           <input
             type="password"
@@ -74,11 +98,11 @@ export default function Auth({ onLogin }) {
             autoComplete={mode === 'create' ? 'new-password' : 'current-password'}
           />
           {error && (
-        <p className="auth-error">
-          {error}
-          {error.includes('already exists') && ' Try logging in instead.'}
-        </p>
-      )}
+            <p className="auth-error">
+              {error}
+              {error.includes('already exists') && ' Try logging in instead.'}
+            </p>
+          )}
           <button type="submit" disabled={loading}>
             {loading ? '...' : mode === 'login' ? 'Log in' : 'Create account'}
           </button>
